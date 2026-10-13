@@ -1,134 +1,119 @@
-/**
- * NexusGGR / FiversCan API — JavaScript (Node.js 18+) integration sample
- * ======================================================================
- * Endpoint  : POST https://{API_SERVER}          (JSON in, JSON out)
- * Auth      : every request body carries agent_code + agent_token
- * Response  : { "status": 1, "msg": "SUCCESS", ... }   on success
- *             { "status": 0, "msg": "<ERROR>" }        on failure
- * Methods   : provider_list, game_list, user_create, user_deposit,
- *             game_launch, money_info, user_withdraw
- * API access: https://t.me/casino_api777  ·  https://nexusggr.games
- *
- * Run:
- *   FVS_API_URL=https://api.example.com FVS_AGENT_CODE=... FVS_AGENT_TOKEN=... node index.js
- */
+(() => {
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const selections = new Map();
+  const slipBody = $('#slipBody');
+  const slipCalc = $('#slipCalc');
+  const slipCount = $('#slipCount');
+  const stakeInput = $('#stake');
+  const potential = $('#potential');
+  const toast = $('#toast');
+  const modalBackdrop = $('#modalBackdrop');
+  let toastTimer;
+  let modalMode = 'login';
 
-const API_URL     = process.env.FVS_API_URL     || "https://api.example.com"; // API server you received from NexusGGR
-const AGENT_CODE  = process.env.FVS_AGENT_CODE  || "your_agent_code";
-const AGENT_TOKEN = process.env.FVS_AGENT_TOKEN || "your_agent_token";
-
-class FiversCanError extends Error {
-    constructor(method, msg, detail) {
-        super(`${method} failed: ${msg}${detail ? ` (${detail})` : ""}`);
-        this.method = method;
-        this.msg = msg;
-        this.detail = detail;
+  function showToast(message) {
+    toast.textContent = message;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+  }
+  function money(value) {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+  }
+  function renderSlip() {
+    slipCount.textContent = String(selections.size);
+    $$('.odd').forEach(button => {
+      const key = button.dataset.odd;
+      button.classList.toggle('chosen', selections.has(key));
+    });
+    if (!selections.size) {
+      slipBody.className = 'slip-empty';
+      slipBody.innerHTML = '<span class="slip-empty-icon">＋</span><b>Seu boletim está vazio</b><p>Selecione uma cotação em um jogo para adicionar sua seleção aqui.</p>';
+      slipCalc.hidden = true;
+      return;
     }
-}
-
-class FiversCanClient {
-    constructor({ apiUrl, agentCode, agentToken }) {
-        this.apiUrl = apiUrl;
-        this.agentCode = agentCode;
-        this.agentToken = agentToken;
+    slipBody.className = 'slip-selections';
+    slipBody.innerHTML = [...selections.entries()].map(([name, item]) =>
+      '<div class="slip-selection"><div class="selection-top"><span>' + name + '</span><button type="button" data-remove="' + name.replace(/"/g, '&quot;') + '" aria-label="Remover seleção">×</button></div><div class="selection-match">' + item.match + '</div><div class="selection-odd">Cotação ' + item.value.toFixed(2) + '</div></div>'
+    ).join('');
+    slipCalc.hidden = false;
+    updatePotential();
+  }
+  function updatePotential() {
+    const stake = Math.max(0, Number(stakeInput.value) || 0);
+    const multiplier = [...selections.values()].reduce((total, item) => total * item.value, 1);
+    potential.textContent = money(stake * multiplier);
+  }
+  $$('.odd').forEach(button => button.addEventListener('click', () => {
+    const name = button.dataset.odd;
+    const card = button.closest('.match-card');
+    const match = card ? $$('.team b', card).map(el => el.textContent).join(' x ') : 'Partida demonstrativa';
+    if (selections.has(name)) {
+      selections.delete(name);
+      showToast('Seleção removida do boletim');
+    } else {
+      // Keep only one outcome per match, like a standard bet slip.
+      if (card) {
+        const teams = $$('.team b', card).map(el => el.textContent).join(' x ');
+        for (const [oldName, item] of selections.entries()) if (item.match === teams) selections.delete(oldName);
+      }
+      selections.set(name, { value: Number(button.dataset.value), match });
+      showToast('Cotação adicionada ao boletim');
     }
-
-    /** Low-level call: POST { method, agent_code, agent_token, ...params } and unwrap status. */
-    async call(method, params = {}) {
-        const res = await fetch(this.apiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ method, agent_code: this.agentCode, agent_token: this.agentToken, ...params }),
-            signal: AbortSignal.timeout(15_000),
-        });
-        if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
-
-        const data = await res.json();
-        if (data.status !== 1) throw new FiversCanError(method, data.msg, data.detail);
-        return data;
-    }
-
-    providerList() {
-        return this.call("provider_list");
-    }
-
-    gameList(providerCode) {
-        return this.call("game_list", { provider_code: providerCode });
-    }
-
-    userCreate(userCode) {
-        return this.call("user_create", { user_code: userCode });
-    }
-
-    // amount must be a JSON number (not a string); agent_sign is an optional unique id ([A-Za-z0-9_]) that prevents double-charging on retries
-    userDeposit(userCode, amount, agentSign) {
-        return this.call("user_deposit", { user_code: userCode, amount, ...(agentSign && { agent_sign: agentSign }) });
-    }
-
-    userWithdraw(userCode, amount, agentSign) {
-        return this.call("user_withdraw", { user_code: userCode, amount, ...(agentSign && { agent_sign: agentSign }) });
-    }
-
-    // Without user_code returns the agent balance only; with all_users: true returns every user
-    moneyInfo(userCode) {
-        return this.call("money_info", userCode ? { user_code: userCode } : {});
-    }
-
-    // game_code may be empty for live-casino providers to open the lobby.
-    // lobby_url and rtp are optional and must be OMITTED when unset: the server rejects "lobby_url": "" (Joi string, empty not allowed)
-    gameLaunch({ userCode, providerCode, gameCode = "", lang = "en", lobbyUrl, rtp }) {
-        return this.call("game_launch", {
-            user_code: userCode,
-            provider_code: providerCode,
-            game_code: gameCode,
-            lang,
-            ...(lobbyUrl && { lobby_url: lobbyUrl }),
-            ...(rtp != null && { rtp }),
-        });
-    }
-}
-
-async function main() {
-    const fvs = new FiversCanClient({ apiUrl: API_URL, agentCode: AGENT_CODE, agentToken: AGENT_TOKEN });
-    const userCode = "demo_user";
-
-    // 1. Providers available to this agent (status 1 = open, 0 = maintenance)
-    const { providers } = await fvs.providerList();
-    const provider = providers.find((p) => p.status === 1) || providers[0];
-    console.log(`providers: ${providers.length}, using ${provider.code}`);
-
-    // 2. Games of that provider
-    const { games } = await fvs.gameList(provider.code);
-    const game = games[0];
-    console.log(`games: ${games.length}, first: ${game.game_code} (${game.game_name})`);
-
-    // 3. Create the player (idempotent: an existing user is fine)
-    try {
-        const created = await fvs.userCreate(userCode);
-        console.log(`user created: ${created.user_code} (${created.fc_code})`);
-    } catch (err) {
-        if (!(err instanceof FiversCanError && /duplicated/i.test(err.msg))) throw err;
-        console.log(`user exists: ${userCode}`);
-    }
-
-    // 4. Move funds agent -> player
-    const dep = await fvs.userDeposit(userCode, 100, `dep_${Date.now()}`);
-    console.log(`deposit ok: agent=${dep.agent_balance} user=${dep.user_balance}`);
-
-    // 5. Get the game URL to open in the player's browser / iframe
-    const launch = await fvs.gameLaunch({ userCode, providerCode: provider.code, gameCode: game.game_code, lang: "en", lobbyUrl: "https://your-site.com/lobby" });
-    console.log(`launch_url: ${launch.launch_url}`);
-
-    // 6. Balances
-    const info = await fvs.moneyInfo(userCode);
-    console.log(`balance: agent=${info.agent.balance} user=${info.user.balance}`);
-
-    // 7. Move funds player -> agent
-    const wd = await fvs.userWithdraw(userCode, 50, `wd_${Date.now()}`);
-    console.log(`withdraw ok: agent=${wd.agent_balance} user=${wd.user_balance}`);
-}
-
-main().catch((err) => {
-    console.error(err.message);
-    process.exit(1);
-});
+    renderSlip();
+  }));
+  slipBody.addEventListener('click', event => {
+    const button = event.target.closest('[data-remove]');
+    if (!button) return;
+    selections.delete(button.dataset.remove);
+    renderSlip();
+  });
+  stakeInput.addEventListener('input', updatePotential);
+  $$('.star').forEach(button => button.addEventListener('click', () => {
+    button.classList.toggle('active');
+    button.textContent = button.classList.contains('active') ? '★' : '☆';
+    showToast(button.classList.contains('active') ? 'Partida adicionada aos favoritos' : 'Partida removida dos favoritos');
+  }));
+  $$('.slip-tab').forEach((button, index) => button.addEventListener('click', () => {
+    $$('.slip-tab').forEach(tab => tab.classList.remove('active'));
+    button.classList.add('active');
+    if (index === 1) showToast('Múltipla: selecione duas ou mais partidas para montar sua combinação.');
+  }));
+  function openModal(mode) {
+    modalMode = mode;
+    const isRegister = mode === 'register';
+    $('#modalTitle').innerHTML = isRegister ? 'Crie sua conta <em>Five.Bet</em>' : 'Bem-vindo à <em>Five.Bet</em>';
+    $('#modalDesc').textContent = isRegister ? 'Cadastre-se para acompanhar sua experiência.' : 'Entre na sua conta para continuar.';
+    $('#modalSubmit').textContent = isRegister ? 'Criar conta' : 'Entrar';
+    $('#switchModal').textContent = isRegister ? 'Já tem conta? Entrar' : 'Ainda não tem conta? Criar conta';
+    modalBackdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+  }
+  function closeModal() {
+    modalBackdrop.hidden = true;
+    document.body.style.overflow = '';
+  }
+  $$('[data-modal]').forEach(button => button.addEventListener('click', () => openModal(button.dataset.modal)));
+  $('#modalClose').addEventListener('click', closeModal);
+  modalBackdrop.addEventListener('click', event => { if (event.target === modalBackdrop) closeModal(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeModal(); });
+  $('#switchModal').addEventListener('click', () => openModal(modalMode === 'login' ? 'register' : 'login'));
+  $('#accountForm').addEventListener('submit', event => {
+    event.preventDefault();
+    closeModal();
+    showToast('Tela demonstrativa: login e cadastro serão conectados depois.');
+  });
+  $$('[data-scroll]').forEach(button => button.addEventListener('click', () => {
+    const target = $(button.dataset.scroll);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
+  $('#menuToggle').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  $$('.side-link').forEach(link => link.addEventListener('click', () => {
+    $$('.side-link').forEach(item => item.classList.remove('selected'));
+    if (link.tagName === 'A') link.classList.add('selected');
+    if (window.matchMedia('(max-width: 800px)').matches) $('#sidebar').classList.remove('open');
+  }));
+  // The interface intentionally uses local sample data only. No casino/sports API calls are made.
+  renderSlip();
+})();
